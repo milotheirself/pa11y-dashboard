@@ -26,6 +26,10 @@ config/development.json
 config/production.json
 config/test.json
 
+# Deployment env files (contain credentials; the sample is kept)
+.env
+.env.*
+
 # Documentation
 *.md
 

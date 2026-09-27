@@ -1,0 +1,43 @@
+{
+	email {$ACME_EMAIL}
+}
+
+{$PUBLIC_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "same-origin"
+		-Server
+	}
+
+	# External uptime checks, so that a monitor does not need a credential.
+	# This reports only that the HTTP server is up; it says nothing about the
+	# database. Everything below /health requires authentication.
+	@health path /health
+	handle @health {
+		reverse_proxy dashboard:4000
+	}
+
+	handle {
+		# Pa11y Dashboard has no authentication of its own. Without this, anyone
+		# on the internet could add a task pointing at an internal address or a
+		# cloud metadata endpoint and read the response back out of the results.
+		#
+		# Note the two arguments: the first is the hash algorithm, the second is
+		# the realm shown in the browser's password prompt. Caddy rejects a lone
+		# argument, so the realm cannot be given on its own. Add further
+		# "username hash" lines inside the block to allow more than one person.
+		basic_auth bcrypt "Pa11y Dashboard" {
+			{$DASHBOARD_USER} {$DASHBOARD_PASSWORD_HASH}
+		}
+
+		reverse_proxy dashboard:4000 {
+			health_uri /health
+			health_interval 30s
+		}
+	}
+
+	log
+}

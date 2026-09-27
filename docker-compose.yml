@@ -1,0 +1,111 @@
+# Production deployment for a public Pa11y Dashboard.
+#
+# Three services:
+#
+#   caddy     the only service exposed to the internet: automatic TLS plus
+#             the HTTP basic auth that the application itself does not have
+#   dashboard the app and its embedded Pa11y Webservice, reachable only
+#             from caddy
+#   mongo     result storage, on an internal network with no route off the
+#             host and no published port
+#
+# All configuration comes from environment variables (see .env.sample). Do not
+# add config/production.json: config.js prefers a config file over the
+# environment, which would silently discard everything set here.
+#
+# Scale to exactly one dashboard replica. Each replica runs its own copy of the
+# cron scheduler, so a second replica means duplicate test runs.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  mongo:
+    image: mongo:8.0
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    logging: *logging
+    networks:
+      - backend
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.example
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: "4000"
+      NOINDEX: "true"
+      READONLY: "${READONLY:-false}"
+      WEBSERVICE_DATABASE: mongodb://mongo:27017/pa11y
+      WEBSERVICE_HOST: 0.0.0.0
+      WEBSERVICE_PORT: "3000"
+      WEBSERVICE_CRON: "${WEBSERVICE_CRON:-0 30 2 * * *}"
+      CHROMIUM_FLAGS: "--no-sandbox,--disable-setuid-sandbox,--disable-dev-shm-usage"
+      TZ: "${TZ:-UTC}"
+    # Chromium renders into /dev/shm, which is only 64MB by default.
+    shm_size: 1gb
+    # Size this to your task list. Each in-flight task holds one Chromium.
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:4000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging: *logging
+    networks:
+      # Not on the internal network alone: Pa11y needs to reach the URLs it audits.
+      - frontend
+      - backend
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    # Deliberately not gated on the dashboard healthcheck, so that caddy stays
+    # up and reports 502 rather than disappearing along with a broken app.
+    depends_on:
+      - dashboard
+    environment:
+      PUBLIC_DOMAIN: "${PUBLIC_DOMAIN:?set PUBLIC_DOMAIN in .env}"
+      DASHBOARD_USER: "${DASHBOARD_USER:?set DASHBOARD_USER in .env}"
+      DASHBOARD_PASSWORD_HASH: "${DASHBOARD_PASSWORD_HASH:?set DASHBOARD_PASSWORD_HASH in .env}"
+      ACME_EMAIL: "${ACME_EMAIL:?set ACME_EMAIL in .env}"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    logging: *logging
+    networks:
+      - frontend
+
+networks:
+  # Has internet access: caddy needs it to renew certificates, and Pa11y needs
+  # it to fetch the pages under test.
+  frontend: {}
+  # No route off the host, so nothing but the dashboard can reach the database.
+  backend:
+    internal: true
+
+volumes:
+  mongo-data:
+  caddy-data:
+  caddy-config:
